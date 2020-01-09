@@ -1,0 +1,433 @@
+---
+title: "How visualizing inferential uncertainty can mislead readers about treatment effects in scientific results: Figures and analyses for CHI 2020 paper"
+author: "Jake M. Hofman, Daniel G. Goldstein, Jessica Hullman"
+date: '`r Sys.Date()`'
+output:
+  html_document:
+    code_folding: hide
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+    fig_width: 6
+    fig_height: 5
+---
+
+
+```{r setup, include = F}
+library(gridExtra)
+library(tidyverse)
+library(scales)
+library(broom)
+library(lsr)
+library(knitr)
+library(lsmeans)
+
+
+subplot_results <- function(plot_data, num_se = 1, show_facets = T, y_label = "Outcome", use_sd = F, dodge_width = 0.2, coord_flip = F, true_effects = NA) {
+  bar_type <- unique(plot_data$bar_type)
+  interval_size <- unique(plot_data$interval_size)
+  
+  # set symbol and color
+  if (bar_type == "pi") {
+    color <- "grey 50"
+    shape <- 17
+  } else if (bar_type == "ci") {
+    color <- "black"
+    shape <- 16
+  } else {
+    stop("shouldn't happen")
+  }
+      
+  p <- ggplot(plot_data, aes(y = mean_outcome, x = condition))
+  
+  if (is.data.frame(true_effects)) {
+    p <- p + geom_hline(data = true_effects, 
+                        aes(yintercept = auc), linetype = 'dashed', alpha = 0.25)
+  }
+  
+  p <- p +
+    geom_errorbar(aes(ymin = lower, ymax = upper), width = 0, color = color) +
+    geom_point(position = position_dodge(width = dodge_width), size = 2, color = color, shape = shape)
+  
+  # set title
+  if (num_se == 1) {
+    if (bar_type == "pi")
+      title <- "The same results with error bars showing one standard deviation"
+    else if (bar_type == "ci")
+      title <- "Results with error bars showing one standard error"
+    else
+      stop("shouldn't happen")
+  } else {
+    if (bar_type == "pi")
+      title <- sprintf("The same results with error bars showing show %d%% of responses", round(100*interval_size))
+    else if (bar_type == "ci")
+      title <- sprintf("Results with error bars showing %d%% CI on the mean", round(100*interval_size))
+  }
+  
+  p <- p + labs(subtitle = title, x = '', y = y_label) +
+    theme(legend.title = element_blank(),
+          legend.position = "none",
+          plot.subtitle = element_text(size=9))
+  
+  if (coord_flip == T) {
+    p <- p + coord_flip()
+  } else {
+    p <- p + theme(axis.title.x = element_blank())
+  }
+  
+  if (show_facets == T)
+    p <- p + facet_wrap(~ facet_var)
+  
+  p
+}
+
+plot_results <- function(df, num_se = 1, show_facets = T, y_label = "Outcome", use_sd = F, dodge_width = 0.2, coord_flip = F, true_effects = NA) {
+  # determine interval size and upper and lower percentiles
+  interval_size <- pnorm(num_se) - pnorm(-num_se)
+  lower_percentile <- (1 - interval_size) / 2
+  upper_percentile <- 1 - lower_percentile
+  
+  # compute summary stats
+  summary_stats <- df %>%
+    group_by(facet_var, condition) %>%
+    summarize(mean_outcome = mean(outcome),
+              sd_outcome = sd(outcome),
+              se_outcome = sd(outcome) / sqrt(n()),
+              pi_lower = ifelse(use_sd == T, mean_outcome - sd_outcome,
+                                quantile(outcome, lower_percentile)),
+              pi_upper = ifelse(use_sd == T, mean_outcome + sd_outcome,
+                                quantile(outcome, upper_percentile)),
+              ci_lower = mean_outcome - num_se*se_outcome,
+              ci_upper = mean_outcome + num_se*se_outcome) %>%
+    ungroup()
+  
+  # separate out confidence interval
+  plot_data_1 <- summary_stats %>%
+    select(condition, facet_var, mean_outcome, lower = ci_lower, upper = ci_upper) %>%
+    mutate(bar_type = "ci", interval_size = interval_size)
+  
+  # separate out prediction interval
+  plot_data_2 <- summary_stats %>%
+    select(condition, facet_var, mean_outcome, lower = pi_lower, upper = pi_upper) %>%
+    mutate(bar_type = "pi", interval_size = interval_size)
+  
+  p1 <- subplot_results(plot_data_1, num_se, show_facets, y_label, use_sd, dodge_width, coord_flip, true_effects)
+  p2 <- subplot_results(plot_data_2, num_se, show_facets, y_label, use_sd, dodge_width, coord_flip, true_effects)
+  
+  grid.arrange(p1, p2, nrow = 2)
+}
+
+```
+
+# Set constants
+```{r set-constants}
+# set style
+theme_set(theme_bw() +
+            theme(panel.grid.major=element_blank(),
+                  panel.grid.minor=element_blank()))
+
+# set figure directory
+figure_dir <- "figures"
+
+# set flag for whether to use +/- 1sd next to 1se bars
+# if true, bars are mean +/- 1sd
+# if false, bars span 68% of responses
+use_1sd_for_1se <- T
+```
+
+# Experiment 1
+
+## Load data
+
+```{r exp1-load-data}
+load('data/experiment_1_clean.Rdata')
+exp1 <- df
+rm(df)
+
+exp1 <- exp1 %>%
+  mutate(condition = recode_factor(as.factor(condition),
+                                   SE = "Visualization\nshowed 95% CI",
+                                   SD = "Visualization\nshowed 95% PI"),
+         condition = factor(as.character(condition), levels = rev(levels(condition))),
+         text_condition = recode_factor(as.factor(text_condition),
+                                        show_both_stats = "Text contained extra information",
+                                        show_viz_stats_only = "Text matched visualization"),
+         text_condition = factor(as.character(text_condition), levels = rev(levels(text_condition))))
+
+exp1_true_dists <- true_dists
+exp1_true_effects <- true_effects
+rm(true_dists, true_effects)
+```
+
+## Remove participants who failed comprehension test
+
+```{r exp1-filter}
+nrow(exp1)
+exp1 <- exp1 %>% filter(superiority_standard == 0.5)
+nrow(exp1)
+```
+
+## Willingness to pay
+
+### T-test
+```{r exp1-wtp-t-test}
+exp1 %>%
+  group_by(text_condition) %>%
+  do(tidy(t.test(wtp_final ~ condition, data = .))) %>%
+  kable()
+```
+
+### Effect size
+```{r exp1-wtp-effect-size}
+exp1 %>%
+  group_by(text_condition) %>%
+  do(data.frame(cohens_d = cohensD(formula = wtp_final ~ condition, data = .))) %>%
+  kable()
+```
+
+### Plots with 1 SE / 68% intervals
+
+```{r exp1-wtp-1se}
+p <- exp1 %>%
+  rename(outcome = wtp_final, facet_var = text_condition) %>%
+  plot_results(num_se = 1, show_facets = T, y_label = "Willingness to pay", use_sd = use_1sd_for_1se, coord_flip = T)
+ggsave(sprintf('%s/exp1-wtp-1se.pdf', figure_dir), p, width = 5, height = 4)
+```
+
+## Probability of superiority
+
+### T-test
+```{r exp1-special-t-test}
+exp1 %>%
+  group_by(text_condition) %>%
+  do(tidy(t.test(superiority_special ~ condition, data = .))) %>%
+  kable()
+```
+
+### Effect size
+```{r exp1-special-effect-size}
+exp1 %>%
+  group_by(text_condition) %>%
+  do(data.frame(cohens_d = cohensD(formula = superiority_special ~ condition, data = .))) %>%
+  kable()
+```
+
+### Plots with 1 SE / 68% intervals
+
+```{r exp1-prob-superiority-1se}
+p <- exp1 %>%
+  rename(outcome = superiority_special, facet_var = text_condition) %>%
+  plot_results(num_se = 1, show_facets = T, y_label = "Probability of superiority", use_sd = use_1sd_for_1se, true_effects = exp1_true_effects, coord_flip = T)
+ggsave(sprintf('%s/exp1-prob-superiority-1se.pdf', figure_dir), p, width = 5, height = 4)
+```
+
+# Experiment 2
+
+## Load data
+
+```{r exp2-load-data}
+load('data/experiment_2_clean.Rdata')
+exp2 <- df
+rm(df)
+
+exp2 <- exp2 %>%
+  mutate(condition = recode_factor(condition,
+                                   HOPS = 'Visualization showed\nanimated samples (HOPs)',
+                                   SD = "Visualization showed\n95% PI",
+                                   SE_rescaled = "Visualization showed\n95% CI rescaled",
+                                   SE = "Visualization showed\n95% CI"))
+
+true_dists <- true_dists %>%
+  mutate(distribution = recode_factor(distribution,
+                                      distribution_special = "Special boulder",
+                                      distribution_standard = "Standard boulder"))  
+
+distbuilder_values_by_worker <- distbuilder_values_by_worker %>%
+  ungroup() %>%
+  mutate(condition = recode_factor(condition,
+                                   HOPS = 'Visualization showed\nanimated samples (HOPs)',
+                                   SD = "Visualization showed\n95% PI",
+                                   SE_rescaled = "Visualization showed\n95% CI rescaled",
+                                   SE = "Visualization showed\n95% CI"),
+         distribution = recode_factor(distribution,
+                                      distribution_special = "Special boulder",
+                                      distribution_standard = "Standard boulder"))
+
+exp2_true_dists <- true_dists
+exp2_true_effects <- true_effects %>%
+  mutate(facet_var = effect_size)
+rm(true_dists, true_effects)
+```
+
+## Remove participants who failed comprehension test
+
+```{r exp2-filter}
+nrow(exp2)
+
+exp2 <- exp2 %>%
+  filter(superiority_standard == .5)
+
+distbuilder_values_by_worker <- distbuilder_values_by_worker %>%
+  filter(superiority_standard == .5)
+
+nrow(exp2)
+```
+
+## Willingness to pay
+
+### Pairwise T-tests
+```{r exp2-wtp-t-test}
+exp2 %>%
+  group_by(effect_size) %>%
+  do(tidy(pairwise.t.test(.$wtp_final, .$condition, data = .))) %>%
+  mutate(group1 = gsub('\n',' ', group1), group2 = gsub('\n',' ', group2)) %>%
+  kable()
+```
+
+### Anova 
+
+```{r exp2-wtp-anova}
+model <- aov(wtp_final ~ effect_size + condition, data = exp2)
+summary(model)
+pairs(lsmeans(model, "condition"), adjust = "none")
+```
+
+### Plots with 1 SE / 68% intervals
+
+```{r exp2-wtp-1se}
+p <- exp2 %>%
+  rename(outcome = wtp_final, facet_var = effect_size) %>%
+  plot_results(num_se = 1, show_facets = T, y_label = "Willingness to pay", use_sd = use_1sd_for_1se, coord_flip = T, dodge_width = 0.5)
+ggsave(sprintf('%s/exp2-wtp-1se.pdf', figure_dir), p, width = 6, height = 5)
+```
+
+
+## Probability of superiority
+
+### Pairwise T-tests
+
+```{r exp2-special-t-test}
+exp2 %>%
+  group_by(effect_size) %>%
+  do(tidy(pairwise.t.test(.$superiority_special, .$condition, data = .))) %>%
+  mutate(group1 = gsub('\n',' ', group1), group2 = gsub('\n',' ', group2)) %>%
+  kable()
+```
+
+### Anova 
+
+```{r exp2-superiority-special-anova}
+model <- aov(superiority_special ~ effect_size + condition, data = exp2)
+summary(model)
+pairs(lsmeans(model, "condition"), adjust = "none")
+```
+
+
+### Plots with 1 SE / 68% intervals
+
+```{r exp2-prob-superiority-1se}
+p <- exp2 %>%
+  rename(outcome = superiority_special, facet_var = effect_size) %>%
+  plot_results(num_se = 1, show_facets = T, y_label = "Stated probability of superiority", use_sd = use_1sd_for_1se, true_effects = exp2_true_effects, dodge_width = 0.5, coord_flip = T)
+ggsave(sprintf('%s/exp2-prob-superiority-1se.pdf', figure_dir), p, width = 6, height = 5)
+```
+
+
+## Aggregate distbuilder histogram
+
+```{r exp2-distbuilder-histogram, fig.width=9, fig.height=3}
+
+bin_size <- mean(diff(bin_labels$label))
+
+plot_data <- merge(bin_labels, exp2_true_dists, all.x = T, all.y = T) %>%
+  mutate(lower = label,
+         center = label + bin_size / 2,
+         upper = label + bin_size,
+         true_frac = pnorm(upper, mean = mean, sd = sd) - pnorm(lower, mean = mean, sd = sd))
+
+distbuilder_values_by_worker %>%
+  group_by(distribution, effect_size, condition, bin) %>%
+  summarize(total_count = sum(count)) %>%
+  group_by(distribution, effect_size, condition) %>%
+  mutate(bin_center = bin + bin_size / 2,
+         frac = total_count / sum(total_count)) %>%
+  ggplot(aes(x = bin_center, y = frac, fill = distribution)) +
+    geom_line(data = plot_data, aes(x = center, y = true_frac, color = distribution), linetype = 'solid') +
+    geom_vline(data = exp2_true_dists,
+               aes(xintercept = mean, color = distribution),
+               linetype = 'dotted') +
+    geom_bar(stat = "identity", position = "identity", alpha = 0.5) +
+    facet_grid(effect_size ~ condition) +
+    scale_fill_discrete(breaks = c('Standard boulder', 'Special boulder')) +
+    scale_color_discrete(breaks = c('Standard boulder', 'Special boulder')) +
+    labs(x = 'Distance',
+         y = 'Fraction of responses') +
+    theme(legend.title = element_blank())
+ggsave(sprintf('%s/exp2-distbuilder-histogram.pdf', figure_dir), width = 9, height = 3)
+```
+
+## Implied standard deviations from distribution builder
+```{r distbuilder_extract_values}
+
+distbuilder_summary_stats_by_worker <- distbuilder_values_by_worker %>%
+  group_by(worker_id, condition, effect_size, distribution) %>%
+  summarize(mean = sum(count * bin) / sum(count),
+            sd = sqrt(sum(count * (bin - mean)^2) / (sum(count - 1)))) %>%
+  ungroup() %>%
+  mutate(condition_bin = ifelse(grepl('^SE', condition),
+                                'Sampling distribution\n(SE, SE rescaled)',
+                                'Population distribution\n(SD, HOPS)'))
+
+```
+
+### Anova 
+
+```{r implied_sd_anova}
+model <- aov(sd ~ effect_size + condition, data = distbuilder_summary_stats_by_worker)
+summary(model)
+pairs(lsmeans(model, "condition"), adjust = "none")
+```
+
+## Implied probability of superiority
+
+### Compute AUC
+
+```{r exp2-distbuilder-compute-auc, warning=FALSE, message=FALSE}
+implied_auc_by_worker <- distbuilder_values_by_worker %>%
+  group_by(worker_id, condition, effect_size) %>%
+  do({
+    data.frame(distribution = rep(.$distribution, .$count),
+               x = rep(.$bin, .$count))
+  }) %>%
+  yardstick::roc_auc(distribution, x) %>%
+  select(-.metric, -.estimator, auc = .estimate) %>%
+  mutate(condition_bin = ifelse(grepl('^SE', condition),
+                                'Sampling distribution\n(SE, SE rescaled)',
+                                'Population distribution\n(SD, HOPS)')) %>%
+  ungroup()
+```
+
+### Anova
+
+```{r implied_prob_superiority_anova}
+model <- aov(auc ~ effect_size + condition, data = implied_auc_by_worker)
+summary(model)
+pairs(lsmeans(model, "condition"), adjust = "none")
+```
+
+### Plots with 1 SE / 68% intervals
+```{r exp2-distbuilder-prob-superiority-1se}
+p <- implied_auc_by_worker %>%
+  rename(outcome = auc, facet_var = effect_size) %>%
+  plot_results(num_se = 1, show_facets = T, y_label = "Implied probability of superiority", use_sd = use_1sd_for_1se, true_effects = exp2_true_effects, dodge_width = 0.5, coord_flip = T)
+ggsave(sprintf('%s/exp2-distbuilder-prob-superiority-1se.pdf', figure_dir), p, width = 6, height = 5)
+```
+
+
+# R Session information with package versions
+
+```{r session-info}
+
+sessionInfo()
+
+```
