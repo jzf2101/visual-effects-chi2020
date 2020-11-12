@@ -1,0 +1,7 @@
+install.packages("gridExtra")
+install.packages("tidyverse")
+install.packages("scales")
+install.packages("broom")
+install.packages("lsr")
+install.packages("knitr")
+install.packages("lsmeans")
